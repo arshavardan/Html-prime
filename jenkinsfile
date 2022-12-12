@@ -1,0 +1,23 @@
+pipeline { 
+
+  agent any
+ 
+    stages {
+       stage("fetch code") {
+           steps {
+         git branch: 'main', url: 'https://github.com/arshavardan/Html-prime.git'         
+  }
+
+   }
+      stage("install the apache") {
+        steps {
+         sh 'sudo apt install apache2 -y'
+}
+}
+        stage("deploy the code") {
+         steps {
+           sh 'sudo cp -R * /var/www/html/'
+}
+}      
+   }
+    }
