@@ -1,0 +1,455 @@
+import express from 'express';
+import HttpStatus from 'http-status';
+import { ObjectSchema, ValidationResult } from 'joi';
+import { isEmpty } from 'lodash';
+import { FindOneOptions, FindManyOptions, UpdateResult } from 'typeorm';
+import Joi from '../utils/helpers/joi.js';
+import DB from '../utils/connectors/typeorm.js';
+import { ApprovalPolicy } from '../models/approvalPolicy.js';
+import logger from '../utils/logger.js';
+import permit from '../utils/auth/permit.js';
+import { Status } from '../types/enums/Status.js';
+import { ErrorCodes } from '../types/errors/codes.js';
+import { ErrorMessages } from '../types/errors/messages.js';
+
+const router = express.Router();
+
+/* inject: upload-init */
+
+/**
+ * @apiDefine ErrorBlock
+ * @apiErrorExample {json} Error-Response:
+ *     HTTP/1.1 200 Complete
+ *     {
+ *       "status": "error",
+ *       "code": XXXX,
+ *       "error": <i>Error message.</i>
+ *     }
+ * @apiErrorExample {json} Auth-Failed:
+ *     HTTP/1.1 401 Unauthorized
+ *     {
+ *       "status": "error",
+ *       "code": 401
+ *       "error": <i>Error message.</i>
+ *     }
+ */
+
+/**
+ * @api {get} /approvalpolicy/?page=1&limit=1 Fetch all approvalpolicies
+ * @apiName fetchAllApprovalPolicies
+ * @apiGroup ApprovalPolicies
+ * @apiPermission 'all'
+ *
+ * @apiQuery {number} [page] Page number of result
+ * @apiQuery {number} [limit] No of results to return per page
+ *
+ * @apiHeaderExample {json} X-API-Fields:
+ *   {
+ *      "id": true,
+ *      "name": true,
+ *      "policies": true,
+ *      "createdBy": true,
+ *      "updatedBy": true,
+ *      "createdAt": true,
+ *      "updatedAt": true,
+ *   }
+ *
+ * @apiHeaderExample {json} X-API-Sort:
+ *   {
+ *      "id": 'asc' / 'desc',
+ *      "name": 'asc' / 'desc',
+ *      "policies": 'asc' / 'desc',
+ *      "createdBy": 'asc' / 'desc',
+ *      "updatedBy": 'asc' / 'desc',
+ *      "createdAt": 'asc' / 'desc',
+ *      "updatedAt": 'asc' / 'desc',
+ *   }
+ *
+ * @apiSuccessExample {json} Success-Response:
+ *     HTTP/1.1 200 OK
+ *     {
+ *       "status": "success",
+ *       "approvalpolicies": [{
+ *         "id": 1,
+ *         "name": "Policy 1",
+ *         "policies": [{ "userGroups": "admin | moderator", "expiresInDays": 7, "defaultAction": "accept | reject"}],
+ *         "createdBy": 'a023ff8b-cc37-4495-8ea4-258d2ffdc3f0',
+ *         "updatedBy": 'a023ff8b-cc37-4495-8ea4-258d2ffdc3f0',
+ *         "deletedBy": 'a023ff8b-cc37-4495-8ea4-258d2ffdc3f0',
+ *         "createdAt": '2023-01-01T18:30:00.000Z',
+ *         "updatedAt": '2023-01-01T18:30:00.000Z',
+ *         "deletedAt": '2023-01-01T18:30:00.000Z',
+ *       }],
+ *       "count": 1, // total documents
+ *       "pages": 1 // total pages (based on limit passed)
+ *     }
+ * @apiError ErrorRetrieving
+ * @apiUse ErrorBlock
+ */
+router.get('/', permit.allow('all'), async (req: express.Request, res: express.Response) => {
+  try {
+    const q: qs.ParsedQs = req.query;
+    const fields: { [key: string]: boolean } = JSON.parse(req.get('X-API-Fields') || '{}');
+    const sort: { [key: string]: boolean } = JSON.parse(req.get('X-API-Sort') || '{}');
+
+    // Validate Input
+    const schema: ObjectSchema = Joi.object().keys({
+      q: Joi.object().keys({
+        page: Joi.number().error(new Error('Please provide a valid page')).optional(),
+        limit: Joi.number().error(new Error('Please provide a valid limit')).optional(),
+        relations: Joi.boolean().error(new Error('Please provide a valid relations')).optional(),
+      }),
+      fields: Joi.object().keys({
+        name: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for name')).optional(),
+        policies: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for policies')).optional(),
+        createdBy: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for createdBy')).optional(),
+        updatedBy: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for updatedBy')).optional(),
+        createdAt: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for createdAt')).optional(),
+        updatedAt: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for updatedAt')).optional(),
+      }),
+      sort: Joi.object().keys({
+        name: Joi.string().valid('asc', 'desc').error(new Error('Please provide a valid sort option for name')).optional(),
+        policies: Joi.string().valid('asc', 'desc').error(new Error('Please provide a valid sort option for policies')).optional(),
+        createdBy: Joi.string().valid('asc', 'desc').error(new Error('Please provide a valid sort option for createdBy')).optional(),
+        updatedBy: Joi.string().valid('asc', 'desc').error(new Error('Please provide a valid sort option for updatedBy')).optional(),
+        createdAt: Joi.string().valid('asc', 'desc').error(new Error('Please provide a valid sort option for createdAt')).optional(),
+        updatedAt: Joi.string().valid('asc', 'desc').error(new Error('Please provide a valid sort option for updatedAt')).optional(),
+      }),
+    });
+    const validation: ValidationResult = schema.validate({ q, fields });
+    if (validation.error) {
+      logger.info('[fetchAllApprovalPolicies]', validation.error.message);
+      return res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1007, error: validation.error.message });
+    }
+
+    const page = typeof q.page === 'string' ? parseInt(q.page, 10) : 0;
+    const limit = typeof q.limit === 'string' ? parseInt(q.limit, 10) : 50;
+
+    const query: FindManyOptions = {
+      skip: page * limit,
+      take: limit,
+    };
+
+    if (!isEmpty(fields)) {
+      query.select = fields;
+    }
+
+    if (!isEmpty(sort)) {
+      query.order = sort;
+    }
+
+    const ApprovalPolicyRepository = DB.getDataStore().getRepository(ApprovalPolicy);
+    const [result, count] = await ApprovalPolicyRepository.findAndCount(query);
+    res.status(HttpStatus.OK).send({ status: Status.SUCCESS, approvalpolicies: result, count, pages: Math.ceil(count / limit) });
+  } catch (err: unknown) {
+    if (err instanceof Error) {
+      logger.error('[fetchAllApprovalPolicies]', err.message);
+    }
+    res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1001, error: ErrorMessages.E1001 });
+  }
+});
+
+/* inject: route-get */
+/**
+ * @api {get} /approvalpolicy/:approvalpolicyId Fetch approvalpolicy with given Id
+ * @apiName fetchApprovalPolicy
+ * @apiGroup ApprovalPolicies
+ * @apiPermission 'all'
+ *
+ * @apiParam approvalpolicyId ApprovalPolicy's Unique Id
+ *
+ * @apiHeaderExample {json} X-API-Fields:
+ *   {
+ *      "id": true,
+ *      "name": true,
+ *      "policies": true,
+ *      "createdBy": true,
+ *      "updatedBy": true,
+ *      "createdAt": true,
+ *      "updatedAt": true,
+ *   }
+ *
+ * @apiSuccessExample {json} Success-Response:
+ *     HTTP/1.1 200 OK
+ *     {
+ *       "status": "success",
+ *       "approvalpolicy": {
+ *         "id": 1,
+ *         "name": "Policy 1",
+ *         "policies": [{ "userGroups": "admin | moderator", "expiresInDays": 7, "defaultAction": "accept | reject"}],
+ *         "createdBy": 'a023ff8b-cc37-4495-8ea4-258d2ffdc3f0',
+ *         "updatedBy": 'a023ff8b-cc37-4495-8ea4-258d2ffdc3f0',
+ *         "deletedBy": 'a023ff8b-cc37-4495-8ea4-258d2ffdc3f0',
+ *         "createdAt": '2023-01-01T18:30:00.000Z',
+ *         "updatedAt": '2023-01-01T18:30:00.000Z',
+ *         "deletedAt": '2023-01-01T18:30:00.000Z',
+ *       }
+ *     }
+ * @apiError ErrorRetrieving
+ * @apiUse ErrorBlock
+ */
+
+router.get('/:approvalpolicyId', permit.allow('all'), async (req: express.Request, res: express.Response) => {
+  const id: number = parseInt(req.params.approvalpolicyId, 10);
+  const q: qs.ParsedQs = req.query;
+  const fields: { [key: string]: boolean } = JSON.parse(req.get('X-API-Fields') || '{}');
+
+  // Validate Input
+  const schema: ObjectSchema = Joi.object().keys({
+    id: Joi.number().required().error(new Error('Please provide a valid number for approvalpolicyId')),
+    q: Joi.object().keys({
+      relations: Joi.boolean().error(new Error('Please provide a valid relations')).optional(),
+    }),
+    fields: Joi.object().keys({
+      name: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for name')).optional(),
+      policies: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for policies')).optional(),
+      createdBy: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for createdBy')).optional(),
+      updatedBy: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for updatedBy')).optional(),
+      createdAt: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for createdAt')).optional(),
+      updatedAt: Joi.boolean().valid(true).error(new Error('Please provide a valid field option for updatedAt')).optional(),
+    }),
+  });
+  const validation: ValidationResult = schema.validate({ id, q, fields });
+  if (validation.error) {
+    logger.info('[fetchApprovalPolicy]', validation.error.message);
+    return res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1007, error: validation.error.message });
+  }
+
+  try {
+    const query: FindOneOptions = {
+      where: { id },
+    };
+
+    if (!isEmpty(fields)) {
+      query.select = fields;
+    }
+
+    const ApprovalPolicyRepository = DB.getDataStore().getRepository(ApprovalPolicy);
+    const approvalpolicy = await ApprovalPolicyRepository.findOne(query);
+    if (!approvalpolicy) {
+      return res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1006, error: ErrorMessages.E1006 });
+    }
+    res.status(HttpStatus.OK).send({ status: Status.SUCCESS, approvalpolicy });
+  } catch (err: unknown) {
+    if (err instanceof Error) {
+      logger.error('[fetchApprovalPolicy]', err.message);
+    }
+    res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1002, error: ErrorMessages.E1002 });
+  }
+});
+
+/**
+ * @api {post} /approvalpolicy/ Create approvalpolicy
+ * @apiName createApprovalPolicy
+ * @apiGroup ApprovalPolicies
+ * @apiPermission 'all'
+ *
+ * @apiHeaderExample {json} Input:
+ *     {
+ *         "name": "Policy 1",
+ *         "policies": [{ "userGroups": "admin | moderator", "expiresInDays": 7, "defaultAction": "accept | reject"}]
+ *     }
+ *
+ * @apiSuccessExample {json} Success-Response:
+ *     HTTP/1.1 200 OK
+ *     {
+ *       "status": "success",
+ *       "approvalpolicy": {
+ *         "id": 1,
+ *         "name": "Policy 1",
+ *         "policies": [{ "userGroups": "admin | moderator", "expiresInDays": 7, "defaultAction": "accept | reject"}],
+ *         "createdBy": 'a023ff8b-cc37-4495-8ea4-258d2ffdc3f0',
+ *         "createdAt": '2023-01-01T18:30:00.000Z'
+ *       }
+ *     }
+ * @apiError ErrorRetrieving
+ * @apiUse ErrorBlock
+ */
+
+router.post('/', permit.allow('all'), async (req: express.Request, res: express.Response) => {
+  const b: IApprovalPolicy = req.body;
+
+  // Validate Input
+  const schema: ObjectSchema = Joi.object().keys({
+    b: Joi.object().keys({
+      name: Joi.string().required().error(new Error('Please provide a valid name')),
+      policies: Joi.array()
+        .items(
+          Joi.object()
+            .keys({
+              userGroups: Joi.string().required().error(new Error('Please provide a valid userGroups')),
+              expiresInDays: Joi.number().required().error(new Error('Please provide a valid number for expiresInDays')),
+              defaultAction: Joi.string().required().error(new Error('Please provide a valid defaultAction')),
+            })
+            .required()
+            .error(new Error('Please provide a valid object for policies'))
+        )
+        .required()
+        .error(new Error('Please provide a valid array for policies')),
+    }),
+  });
+  const validation: ValidationResult = schema.validate({ b });
+  if (validation.error) {
+    logger.info('[createApprovalPolicy]', validation.error.message);
+    return res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1007, error: validation.error.message });
+  }
+
+  try {
+    const approvalpolicy = new ApprovalPolicy();
+    approvalpolicy.name = b.name;
+    approvalpolicy.policies = b.policies;
+    approvalpolicy.createdBy = req.user?.id;
+    approvalpolicy.updatedBy = req.user?.id;
+
+    const ApprovalPolicyRepository = DB.getDataStore().getRepository(ApprovalPolicy);
+    await ApprovalPolicyRepository.save(approvalpolicy);
+
+    res.status(HttpStatus.OK).send({ status: Status.SUCCESS, approvalpolicy });
+  } catch (err: unknown) {
+    if (err instanceof Error) {
+      logger.error('[createApprovalPolicy]', err.message);
+    }
+    res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1003, error: ErrorMessages.E1003 });
+  }
+});
+
+/* inject: route-post */
+/* inject: route-put */
+/**
+ * @api {put} /approvalpolicy/:approvalpolicyId Update approvalpolicy
+ * @apiName updateApprovalPolicy
+ * @apiGroup ApprovalPolicies
+ * @apiPermission 'all'
+ *
+ * @apiParam approvalpolicyId ApprovalPolicy's Unique Id
+ * @apiHeaderExample {json} Input:
+ *     {
+ *         "name": "Policy 1",
+ *         "policies": [{ "userGroups": "admin | moderator", "expiresInDays": 7, "defaultAction": "accept | reject"}]
+ *     }
+ *
+ * @apiSuccessExample {json} Success-Response:
+ *     HTTP/1.1 200 OK
+ *     {
+ *       "status": "success",
+ *       "approvalpolicy": {
+ *         "id": 1,
+ *         "name": "Policy 1",
+ *         "policies": [{ "userGroups": "admin | moderator", "expiresInDays": 7, "defaultAction": "accept | reject"}],
+ *         "updatedBy": 'a023ff8b-cc37-4495-8ea4-258d2ffdc3f0',
+ *         "updatedAt": '2023-01-01T18:30:00.000Z'
+ *       }
+ *     }
+ * @apiError ErrorRetrieving
+ * @apiUse ErrorBlock
+ */
+
+router.put('/:approvalpolicyId', permit.allow('all'), async (req: express.Request, res: express.Response) => {
+  const id: number = parseInt(req.params.approvalpolicyId, 10);
+  const b: Partial<IApprovalPolicy> = req.body;
+
+  // Validate Input
+  const schema: ObjectSchema = Joi.object().keys({
+    id: Joi.number().required().error(new Error('Please provide a valid number for approvalpolicyId')),
+    b: Joi.object().keys({
+      name: Joi.string().error(new Error('Please provide a valid name')),
+      policies: Joi.array()
+        .items(
+          Joi.object()
+            .keys({
+              userGroups: Joi.string().error(new Error('Please provide a valid userGroups')),
+              expiresInDays: Joi.number().error(new Error('Please provide a valid number for expiresInDays')),
+              defaultAction: Joi.string().error(new Error('Please provide a valid defaultAction')),
+            })
+            .error(new Error('Please provide a valid object for policies'))
+        )
+        .error(new Error('Please provide a valid array for policies')),
+    }),
+  });
+  const validation: ValidationResult = schema.validate({ id, b });
+  if (validation.error) {
+    logger.info('[updateApprovalPolicy]', validation.error.message);
+    return res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1007, error: validation.error.message });
+  }
+
+  const ApprovalPolicyRepository = DB.getDataStore().getRepository(ApprovalPolicy);
+  const approvalpolicy = await ApprovalPolicyRepository.findOneBy({ id });
+  if (!approvalpolicy) {
+    return res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1006, error: ErrorMessages.E1006 });
+  }
+
+  if (typeof b.name !== 'undefined') {
+    approvalpolicy.name = b.name;
+  }
+
+  if (typeof b.policies !== 'undefined') {
+    approvalpolicy.policies = b.policies;
+  }
+
+  try {
+    approvalpolicy.updatedBy = req.user?.id;
+    await ApprovalPolicyRepository.save(approvalpolicy);
+    return res.status(HttpStatus.OK).send({ status: Status.SUCCESS, approvalpolicy });
+  } catch (err: unknown) {
+    if (err instanceof Error) {
+      logger.error('[updateApprovalPolicy]', err.message);
+    }
+    res.status(HttpStatus.OK).send({ status: Status.ERROR, codes: ErrorCodes.E1004, error: ErrorMessages.E1004 });
+  }
+});
+
+/* inject: route-delete */
+/**
+ * @api {delete} /approvalpolicy/:approvalpolicyId Delete approvalpolicy
+ * @apiName deleteApprovalPolicy
+ * @apiGroup ApprovalPolicies
+ * @apiPermission 'all'
+ *
+ * @apiParam approvalpolicyId ApprovalPolicy's Unique Id
+ * @apiSuccessExample {json} Success-Response:
+ *     HTTP/1.1 200 OK
+ *     {
+ *       "status": "success"
+ *     }
+ * @apiError ErrorRetrieving
+ * @apiUse ErrorBlock
+ */
+
+router.delete('/:approvalpolicyId', permit.allow('all'), async (req: express.Request, res: express.Response) => {
+  const id: number = parseInt(req.params.approvalpolicyId, 10);
+
+  // Validate Input
+  const schema: ObjectSchema = Joi.object().keys({
+    id: Joi.number().required().error(new Error('Please provide a valid number for approvalpolicyId')),
+  });
+  const validation: ValidationResult = schema.validate({ id });
+  if (validation.error) {
+    logger.info('[deleteApprovalPolicy]', validation.error.message);
+    return res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1007, error: validation.error.message });
+  }
+
+  try {
+    const ApprovalPolicyRepository = DB.getDataStore().getRepository(ApprovalPolicy);
+    const approvalpolicy = await ApprovalPolicyRepository.findOneBy({ id });
+    if (!approvalpolicy) {
+      return res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1006, error: ErrorMessages.E1006 });
+    }
+
+    approvalpolicy.deletedBy = req.user?.id;
+    await ApprovalPolicyRepository.save(approvalpolicy);
+
+    const result: UpdateResult = await ApprovalPolicyRepository.softDelete(id);
+
+    if (typeof result.affected !== 'undefined' && result.affected > 0) {
+      return res.status(HttpStatus.OK).send({ status: Status.SUCCESS });
+    }
+    return res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1006, error: ErrorMessages.E1006 });
+  } catch (err: unknown) {
+    if (err instanceof Error) {
+      logger.error('[deleteApprovalPolicy]', err.message);
+    }
+    return res.status(HttpStatus.OK).send({ status: Status.ERROR, code: ErrorCodes.E1005, error: ErrorMessages.E1005 });
+  }
+});
+
+export default router;
